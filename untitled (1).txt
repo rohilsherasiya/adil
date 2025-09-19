@@ -1,0 +1,2208 @@
+shopping-app/
+│
+├─ backend/                # Node.js + Express + MongoDB
+│  ├─ models/
+│  │   ├─ User.js
+│  │   ├─ Product.js
+│  │   └─ Order.js
+│  ├─ routes/
+│  │   ├─ authRoutes.js
+│  │   ├─ productRoutes.js
+│  │   └─ orderRoutes.js
+│  ├─ middleware/
+│  │   └─ authMiddleware.js
+│  ├─ config/
+│  │   └─ db.js
+│  └─ server.js
+│
+├─ frontend/               # React app
+│  ├─ src/
+│  │   ├─ components/
+│  │   ├─ pages/
+│  │   │   ├─ Home.js
+│  │   │   ├─ Product.js
+│  │   │   ├─ Cart.js
+│  │   │   ├─ Checkout.js
+│  │   │   ├─ AdminDashboard.js
+│  │   │   └─ Login.js
+│  │   ├─ App.js
+│  │   └─ index.js
+│
+└─ package.json
+cd backend
+npm init -y
+npm install express mongoose bcryptjs jsonwebtoken cors dotenv stripe
+const mongoose = require("mongoose");
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("MongoDB Connected");
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+};
+module.exports = connectDB;
+const mongoose = require("mongoose");
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isAdmin: { type: Boolean, default: false },
+}, { timestamps: true });
+module.exports = mongoose.model("User", userSchema);
+const mongoose = require("mongoose");
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: String,
+  price: { type: Number, required: true },
+  image: String,
+  countInStock: { type: Number, default: 0 },
+}, { timestamps: true });
+module.exports = mongoose.model("Product", productSchema);
+const mongoose = require("mongoose");
+const orderSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  orderItems: [{ name: String, qty: Number, price: Number, product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" } }],
+  totalPrice: Number,
+  isPaid: { type: Boolean, default: false },
+}, { timestamps: true });
+module.exports = mongoose.model("Order", orderSchema);
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+const protect = async (req, res, next) => {
+  let token;
+  if (req.headers.authorization?.startsWith("Bearer")) {
+    token = req.headers.authorization.split(" ")[1];
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.id).select("-password");
+      next();
+    } catch (err) {
+      res.status(401).json({ message: "Not authorized" });
+    }
+  } else {
+    res.status(401).json({ message: "No token" });
+  }
+};
+
+module.exports = { protect };
+const express = require("express");
+const router = express.Router();
+const Product = require("../models/Product");
+const { protect } = require("../middleware/authMiddleware");
+
+// Get all products
+router.get("/", async (req, res) => {
+  const products = await Product.find({});
+  res.json(products);
+});
+
+// Admin: Create product
+router.post("/", protect, async (req, res) => {
+  if (!req.user.isAdmin) return res.status(401).json({ message: "Not authorized" });
+  const product = new Product(req.body);
+  const createdProduct = await product.save();
+  res.status(201).json(createdProduct);
+});
+
+module.exports = router;
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const connectDB = require("./config/db");
+
+dotenv.config();
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/products", require("./routes/productRoutes"));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+npx create-react-app frontend
+cd frontend
+npm install axios react-router-dom
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+const Home = () => {
+  const [products, setProducts] = useState([]);
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/products");
+      setProducts(data);
+    };
+    fetchProducts();
+  }, []);
+
+  return (
+    <div>
+      <h1>Products</h1>
+      <div style={{ display: "flex", gap: "20px", flexWrap: "wrap" }}>
+        {products.map(p => (
+          <div key={p._id} style={{ border: "1px solid #ccc", padding: "10px" }}>
+            <img src={p.image} alt={p.name} width="150" />
+            <h3>{p.name}</h3>
+            <p>${p.price}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default Home;
+import React, { createContext, useReducer, useContext } from "react";
+
+const CartStateContext = createContext();
+const CartDispatchContext = createContext();
+
+const cartReducer = (state, action) => {
+  switch (action.type) {
+    case "ADD_TO_CART":
+      const existItem = state.cartItems.find(x => x._id === action.payload._id);
+      if (existItem) {
+        return {
+          ...state,
+          cartItems: state.cartItems.map(x =>
+            x._id === existItem._id ? { ...x, qty: x.qty + 1 } : x
+          ),
+        };
+      } else {
+        return { ...state, cartItems: [...state.cartItems, { ...action.payload, qty: 1 }] };
+      }
+    case "REMOVE_FROM_CART":
+      return {
+        ...state,
+        cartItems: state.cartItems.filter(x => x._id !== action.payload._id),
+      };
+    case "CLEAR_CART":
+      return { ...state, cartItems: [] };
+    default:
+      throw new Error(`Unknown action: ${action.type}`);
+  }
+};
+
+export const CartProvider = ({ children }) => {
+  const [state, dispatch] = useReducer(cartReducer, { cartItems: [] });
+  return (
+    <CartDispatchContext.Provider value={dispatch}>
+      <CartStateContext.Provider value={state}>
+        {children}
+      </CartStateContext.Provider>
+    </CartDispatchContext.Provider>
+  );
+};
+
+export const useCart = () => useContext(CartStateContext);
+export const useCartDispatch = () => useContext(CartDispatchContext);
+import React from "react";
+import ReactDOM from "react-dom";
+import App from "./App";
+import { CartProvider } from "./context/CartContext";
+
+ReactDOM.render(
+  <CartProvider>
+    <App />
+  </CartProvider>,
+  document.getElementById("root")
+);
+import { useCartDispatch } from "../context/CartContext";
+
+// inside map
+const dispatch = useCartDispatch();
+
+<button onClick={() => dispatch({ type: "ADD_TO_CART", payload: p })}>
+  Add to Cart
+</button>
+import React from "react";
+import { useCart, useCartDispatch } from "../context/CartContext";
+
+const Cart = () => {
+  const { cartItems } = useCart();
+  const dispatch = useCartDispatch();
+
+  const totalPrice = cartItems.reduce((acc, item) => acc + item.price * item.qty, 0);
+
+  return (
+    <div>
+      <h1>Your Cart</h1>
+      {cartItems.length === 0 ? (
+        <p>Cart is empty</p>
+      ) : (
+        <div>
+          {cartItems.map(item => (
+            <div key={item._id}>
+              {item.name} x {item.qty} - ${item.price * item.qty}
+              <button onClick={() => dispatch({ type: "REMOVE_FROM_CART", payload: item })}>
+                Remove
+              </button>
+            </div>
+          ))}
+          <h3>Total: ${totalPrice}</h3>
+          <button onClick={() => window.location.href = "/checkout"}>
+            Proceed to Checkout
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Cart;
+cd backend
+npm install stripe
+const express = require("express");
+const router = express.Router();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { protect } = require("../middleware/authMiddleware");
+const Order = require("../models/Order");
+
+router.post("/create-checkout-session", protect, async (req, res) => {
+  const { cartItems } = req.body;
+
+  const line_items = cartItems.map(item => ({
+    price_data: {
+      currency: "usd",
+      product_data: { name: item.name },
+      unit_amount: Math.round(item.price * 100),
+    },
+    quantity: item.qty,
+  }));
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ["card"],
+    line_items,
+    mode: "payment",
+    success_url: `${process.env.CLIENT_URL}/success`,
+    cancel_url: `${process.env.CLIENT_URL}/cart`,
+  });
+
+  res.json({ url: session.url });
+});
+
+module.exports = router;
+import React from "react";
+import { useCart } from "../context/CartContext";
+import axios from "axios";
+
+const Checkout = () => {
+  const { cartItems } = useCart();
+
+  const handleCheckout = async () => {
+    const { data } = await axios.post("http://localhost:5000/api/orders/create-checkout-session", {
+      cartItems
+    }, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+
+    window.location.href = data.url;
+  };
+
+  return (
+    <div>
+      <h1>Checkout</h1>
+      <button onClick={handleCheckout}>Pay with Card</button>
+    </div>
+  );
+};
+
+export default Checkout;
+const admin = (req, res, next) => {
+  if (req.user && req.user.isAdmin) {
+    next();
+  } else {
+    res.status(401).json({ message: "Not authorized as admin" });
+  }
+};
+
+module.exports = admin;
+const express = require("express");
+const router = express.Router();
+const Product = require("../models/Product");
+const Order = require("../models/Order");
+const User = require("../models/User");
+const { protect } = require("../middleware/authMiddleware");
+const admin = require("../middleware/adminMiddleware");
+
+// --- Product Management ---
+router.get("/products", protect, admin, async (req, res) => {
+  const products = await Product.find({});
+  res.json(products);
+});
+
+router.post("/products", protect, admin, async (req, res) => {
+  const product = new Product(req.body);
+  const createdProduct = await product.save();
+  res.status(201).json(createdProduct);
+});
+
+router.put("/products/:id", protect, admin, async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (product) {
+    Object.assign(product, req.body);
+    const updatedProduct = await product.save();
+    res.json(updatedProduct);
+  } else {
+    res.status(404).json({ message: "Product not found" });
+  }
+});
+
+router.delete("/products/:id", protect, admin, async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (product) {
+    await product.remove();
+    res.json({ message: "Product removed" });
+  } else {
+    res.status(404).json({ message: "Product not found" });
+  }
+});
+
+// --- View Orders ---
+router.get("/orders", protect, admin, async (req, res) => {
+  const orders = await Order.find({}).populate("user", "name email");
+  res.json(orders);
+});
+
+// --- View Users ---
+router.get("/users", protect, admin, async (req, res) => {
+  const users = await User.find({});
+  res.json(users);
+});
+
+module.exports = router;
+app.use("/api/admin", require("./routes/adminRoutes"));
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+const AdminDashboard = () => {
+  const [products, setProducts] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [users, setUsers] = useState([]);
+
+  const token = localStorage.getItem("token");
+
+  // Fetch data
+  useEffect(() => {
+    const fetchProducts = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/admin/products", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setProducts(data);
+    };
+
+    const fetchOrders = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/admin/orders", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setOrders(data);
+    };
+
+    const fetchUsers = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/admin/users", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setUsers(data);
+    };
+
+    fetchProducts();
+    fetchOrders();
+    fetchUsers();
+  }, [token]);
+
+  return (
+    <div>
+      <h1>Admin Dashboard</h1>
+
+      <section>
+        <h2>Products</h2>
+        {products.map(p => (
+          <div key={p._id}>
+            {p.name} - ${p.price}
+          </div>
+        ))}
+      </section>
+
+      <section>
+        <h2>Orders</h2>
+        {orders.map(o => (
+          <div key={o._id}>
+            Order by {o.user.name} - Total: ${o.totalPrice}
+          </div>
+        ))}
+      </section>
+
+      <section>
+        <h2>Users</h2>
+        {users.map(u => (
+          <div key={u._id}>
+            {u.name} - {u.email} - {u.isAdmin ? "Admin" : "Customer"}
+          </div>
+        ))}
+      </section>
+    </div>
+  );
+};
+
+export default AdminDashboard;
+import React from "react";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import Home from "./pages/Home";
+import Cart from "./pages/Cart";
+import Checkout from "./pages/Checkout";
+import AdminDashboard from "./pages/AdminDashboard";
+import Login from "./pages/Login";
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/cart" element={<Cart />} />
+        <Route path="/checkout" element={<Checkout />} />
+        <Route path="/admin" element={<AdminDashboard />} />
+        <Route path="/login" element={<Login />} />
+      </Routes>
+    </Router>
+  );
+}
+
+export default App;
+import React, { useState } from "react";
+import axios from "axios";
+
+const Login = () => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const { data } = await axios.post("http://localhost:5000/api/auth/login", { email, password });
+    localStorage.setItem("token", data.token);
+    alert("Login successful!");
+    window.location.href = "/";
+  };
+
+  return (
+    <div>
+      <h1>Login</h1>
+      <form onSubmit={handleSubmit}>
+        <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <button type="submit">Login</button>
+      </form>
+    </div>
+  );
+};
+
+export default Login;
+const express = require("express");
+const router = express.Router();
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+// Register
+router.post("/register", async (req, res) => {
+  const { name, email, password } = req.body;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const user = await User.create({ name, email, password: hashedPassword });
+  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+  res.json({ token });
+});
+
+// Login
+router.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (user && await bcrypt.compare(password, user.password)) {
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+    res.json({ token });
+  } else {
+    res.status(401).json({ message: "Invalid credentials" });
+  }
+});
+
+module.exports = router;
+app.use("/api/auth", require("./routes/authRoutes"));
+MONGO_URI=mongodb://localhost:27017/shoppingapp
+JWT_SECRET=your_jwt_secret
+STRIPE_SECRET_KEY=your_stripe_secret
+CLIENT_URL=http://localhost:3000
+PORT=5000
+cd backend
+npm install
+node server.js
+cd frontend
+npm install
+npm start
+shopping-app/
+│
+├─ backend/
+│  ├─ config/
+│  │   └─ db.js
+│  ├─ middleware/
+│  │   ├─ authMiddleware.js
+│  │   └─ adminMiddleware.js
+│  ├─ models/
+│  │   ├─ User.js
+│  │   ├─ Product.js
+│  │   └─ Order.js
+│  ├─ routes/
+│  │   ├─ authRoutes.js
+│  │   ├─ productRoutes.js
+│  │   ├─ orderRoutes.js
+│  │   └─ adminRoutes.js
+│  ├─ .env
+│  └─ server.js
+│
+├─ frontend/
+│  ├─ src/
+│  │   ├─ context/
+│  │   │   └─ CartContext.js
+│  │   ├─ pages/
+│  │   │   ├─ Home.js
+│  │   │   ├─ Cart.js
+│  │   │   ├─ Checkout.js
+│  │   │   ├─ AdminDashboard.js
+│  │   │   └─ Login.js
+│  │   ├─ App.js
+│  │   └─ index.js
+│  ├─ package.json
+│  └─ public/
+│      └─ index.html
+│
+└─ README.md
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const connectDB = require("./config/db");
+
+dotenv.config();
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/products", require("./routes/productRoutes"));
+app.use("/api/orders", require("./routes/orderRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+MONGO_URI=mongodb://localhost:27017/shoppingapp
+JWT_SECRET=your_jwt_secret
+STRIPE_SECRET_KEY=your_stripe_secret
+CLIENT_URL=http://localhost:3000
+PORT=5000
+import React from "react";
+import ReactDOM from "react-dom";
+import App from "./App";
+import { CartProvider } from "./context/CartContext";
+
+ReactDOM.render(
+  <CartProvider>
+    <App />
+  </CartProvider>,
+  document.getElementById("root")
+);
+import React from "react";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import Home from "./pages/Home";
+import Cart from "./pages/Cart";
+import Checkout from "./pages/Checkout";
+import AdminDashboard from "./pages/AdminDashboard";
+import Login from "./pages/Login";
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/cart" element={<Cart />} />
+        <Route path="/checkout" element={<Checkout />} />
+        <Route path="/admin" element={<AdminDashboard />} />
+        <Route path="/login" element={<Login />} />
+      </Routes>
+    </Router>
+  );
+}
+
+export default App;
+import React, { createContext, useReducer, useContext } from "react";
+
+const CartStateContext = createContext();
+const CartDispatchContext = createContext();
+
+const cartReducer = (state, action) => {
+  switch (action.type) {
+    case "ADD_TO_CART":
+      const existItem = state.cartItems.find(x => x._id === action.payload._id);
+      if (existItem) {
+        return {
+          ...state,
+          cartItems: state.cartItems.map(x =>
+            x._id === existItem._id ? { ...x, qty: x.qty + 1 } : x
+          ),
+        };
+      } else {
+        return { ...state, cartItems: [...state.cartItems, { ...action.payload, qty: 1 }] };
+      }
+    case "REMOVE_FROM_CART":
+      return { ...state, cartItems: state.cartItems.filter(x => x._id !== action.payload._id) };
+    case "CLEAR_CART":
+      return { ...state, cartItems: [] };
+    default:
+      throw new Error(`Unknown action: ${action.type}`);
+  }
+};
+
+export const CartProvider = ({ children }) => {
+  const [state, dispatch] = useReducer(cartReducer, { cartItems: [] });
+  return (
+    <CartDispatchContext.Provider value={dispatch}>
+      <CartStateContext.Provider value={state}>
+        {children}
+      </CartStateContext.Provider>
+    </CartDispatchContext.Provider>
+  );
+};
+
+export const useCart = () => useContext(CartStateContext);
+export const useCartDispatch = () => useContext(CartDispatchContext);
+git clone <your-repo-url>
+cd shopping-app
+cd backend
+npm install
+node server.js
+cd ../frontend
+npm install
+npm start
+const mongoose = require("mongoose");
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("MongoDB Connected");
+  } catch (err) {
+    console.error("DB connection error:", err.message);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+const mongoose = require("mongoose");
+
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isAdmin: { type: Boolean, default: false }
+}, { timestamps: true });
+
+module.exports = mongoose.model("User", userSchema);
+const mongoose = require("mongoose");
+
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: String,
+  price: { type: Number, required: true },
+  image: String,
+  countInStock: { type: Number, default: 0 }
+}, { timestamps: true });
+
+module.exports = mongoose.model("Product", productSchema);
+const mongoose = require("mongoose");
+
+const orderSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  orderItems: [{
+    name: String,
+    qty: Number,
+    price: Number,
+    product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" }
+  }],
+  totalPrice: Number,
+  isPaid: { type: Boolean, default: false }
+}, { timestamps: true });
+
+module.exports = mongoose.model("Order", orderSchema);
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+const protect = async (req, res, next) => {
+  let token;
+  if (req.headers.authorization?.startsWith("Bearer")) {
+    token = req.headers.authorization.split(" ")[1];
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.id).select("-password");
+      next();
+    } catch (err) {
+      res.status(401).json({ message: "Not authorized" });
+    }
+  } else {
+    res.status(401).json({ message: "No token provided" });
+  }
+};
+
+module.exports = { protect };
+const admin = (req, res, next) => {
+  if (req.user && req.user.isAdmin) {
+    next();
+  } else {
+    res.status(401).json({ message: "Not authorized as admin" });
+  }
+};
+
+module.exports = admin;
+const express = require("express");
+const router = express.Router();
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+// Register
+router.post("/register", async (req, res) => {
+  const { name, email, password } = req.body;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const user = await User.create({ name, email, password: hashedPassword });
+  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+  res.json({ token });
+});
+
+// Login
+router.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (user && await bcrypt.compare(password, user.password)) {
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+    res.json({ token });
+  } else {
+    res.status(401).json({ message: "Invalid credentials" });
+  }
+});
+
+module.exports = router;
+const express = require("express");
+const router = express.Router();
+const Product = require("../models/Product");
+const { protect } = require("../middleware/authMiddleware");
+
+// Get all products
+router.get("/", async (req, res) => {
+  const products = await Product.find({});
+  res.json(products);
+});
+
+// Admin: Add product
+router.post("/", protect, async (req, res) => {
+  if (!req.user.isAdmin) return res.status(401).json({ message: "Not authorized" });
+  const product = new Product(req.body);
+  const createdProduct = await product.save();
+  res.status(201).json(createdProduct);
+});
+
+module.exports = router;
+const express = require("express");
+const router = express.Router();
+const Product = require("../models/Product");
+const Order = require("../models/Order");
+const User = require("../models/User");
+const { protect } = require("../middleware/authMiddleware");
+const admin = require("../middleware/adminMiddleware");
+
+// CRUD products
+router.get("/products", protect, admin, async (req, res) => {
+  const products = await Product.find({});
+  res.json(products);
+});
+
+// View orders
+router.get("/orders", protect, admin, async (req, res) => {
+  const orders = await Order.find({}).populate("user", "name email");
+  res.json(orders);
+});
+
+// View users
+router.get("/users", protect, admin, async (req, res) => {
+  const users = await User.find({});
+  res.json(users);
+});
+
+module.exports = router;
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const connectDB = require("./config/db");
+
+dotenv.config();
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/products", require("./routes/productRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+[
+  { "name": "T-Shirt", "description": "Cool cotton t-shirt", "price": 20, "image": "https://via.placeholder.com/150", "countInStock": 50 },
+  { "name": "Jeans", "description": "Blue denim jeans", "price": 40, "image": "https://via.placeholder.com/150", "countInStock": 30 },
+  { "name": "Sneakers", "description": "Comfortable running shoes", "price": 60, "image": "https://via.placeholder.com/150", "countInStock": 20 }
+]
+cd backend
+npm install
+node server.js
+cd ../frontend
+npm install
+npm start
+shopping-app/
+│
+├─ backend/
+│  ├─ config/
+│  │   └─ db.js
+│  ├─ middleware/
+│  │   ├─ authMiddleware.js
+│  │   └─ adminMiddleware.js
+│  ├─ models/
+│  │   ├─ User.js
+│  │   ├─ Product.js
+│  │   └─ Order.js
+│  ├─ routes/
+│  │   ├─ authRoutes.js
+│  │   ├─ productRoutes.js
+│  │   └─ adminRoutes.js
+│  ├─ .env
+│  └─ server.js
+│
+├─ frontend/
+│  ├─ src/
+│  │   ├─ context/
+│  │   │   └─ CartContext.js
+│  │   ├─ pages/
+│  │   │   ├─ Home.js
+│  │   │   ├─ Cart.js
+│  │   │   ├─ Checkout.js
+│  │   │   ├─ AdminDashboard.js
+│  │   │   └─ Login.js
+│  │   ├─ App.js
+│  │   └─ index.js
+│  ├─ package.json
+│  └─ public/
+│      └─ index.html
+│
+└─ README.md
+MONGO_URI=mongodb://localhost:27017/shoppingapp
+JWT_SECRET=your_jwt_secret
+STRIPE_SECRET_KEY=your_stripe_secret
+CLIENT_URL=http://localhost:3000
+PORT=5000
+const mongoose = require("mongoose");
+const dotenv = require("dotenv");
+const Product = require("./models/Product");
+const User = require("./models/User");
+
+dotenv.config();
+mongoose.connect(process.env.MONGO_URI);
+
+const products = [
+  { name: "T-Shirt", description: "Cool cotton t-shirt", price: 20, image: "https://via.placeholder.com/150", countInStock: 50 },
+  { name: "Jeans", description: "Blue denim jeans", price: 40, image: "https://via.placeholder.com/150", countInStock: 30 },
+  { name: "Sneakers", description: "Comfortable running shoes", price: 60, image: "https://via.placeholder.com/150", countInStock: 20 }
+];
+
+const seed = async () => {
+  await Product.deleteMany();
+  await Product.insertMany(products);
+
+  await User.deleteMany();
+  await User.create({ name: "Admin", email: "admin@example.com", password: "admin123", isAdmin: true });
+
+  console.log("Database seeded!");
+  process.exit();
+};
+
+seed();
+node seed.js
+cd backend
+npm install
+node server.js
+cd ../frontend
+npm install
+npm start
+shopping-app/
+│
+├─ backend/
+│  ├─ config/
+│  │   └─ db.js
+│  ├─ middleware/
+│  │   ├─ authMiddleware.js
+│  │   └─ adminMiddleware.js
+│  ├─ models/
+│  │   ├─ User.js
+│  │   ├─ Product.js
+│  │   └─ Order.js
+│  ├─ routes/
+│  │   ├─ authRoutes.js
+│  │   ├─ productRoutes.js
+│  │   └─ adminRoutes.js
+│  ├─ seed.js
+│  ├─ .env
+│  └─ server.js
+│
+├─ frontend/
+│  ├─ src/
+│  │   ├─ context/
+│  │   │   └─ CartContext.js
+│  │   ├─ pages/
+│  │   │   ├─ Home.js
+│  │   │   ├─ Cart.js
+│  │   │   ├─ Checkout.js
+│  │   │   ├─ AdminDashboard.js
+│  │   │   └─ Login.js
+│  │   ├─ App.js
+│  │   └─ index.js
+│  ├─ package.json
+│  └─ public/
+│      └─ index.html
+│
+└─ README.md
+const mongoose = require("mongoose");
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("MongoDB Connected");
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+const mongoose = require("mongoose");
+
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isAdmin: { type: Boolean, default: false }
+}, { timestamps: true });
+
+module.exports = mongoose.model("User", userSchema);
+const mongoose = require("mongoose");
+
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: String,
+  price: { type: Number, required: true },
+  image: String,
+  countInStock: { type: Number, default: 0 }
+}, { timestamps: true });
+
+module.exports = mongoose.model("Product", productSchema);
+const mongoose = require("mongoose");
+
+const orderSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  orderItems: [{
+    name: String,
+    qty: Number,
+    price: Number,
+    product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" }
+  }],
+  totalPrice: Number,
+  isPaid: { type: Boolean, default: false }
+}, { timestamps: true });
+
+module.exports = mongoose.model("Order", orderSchema);
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+const protect = async (req, res, next) => {
+  let token;
+  if (req.headers.authorization?.startsWith("Bearer")) {
+    token = req.headers.authorization.split(" ")[1];
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.id).select("-password");
+      next();
+    } catch (err) {
+      res.status(401).json({ message: "Not authorized" });
+    }
+  } else {
+    res.status(401).json({ message: "No token provided" });
+  }
+};
+
+module.exports = { protect };
+const admin = (req, res, next) => {
+  if (req.user && req.user.isAdmin) {
+    next();
+  } else {
+    res.status(401).json({ message: "Not authorized as admin" });
+  }
+};
+
+module.exports = admin;
+const express = require("express");
+const router = express.Router();
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+// Register
+router.post("/register", async (req, res) => {
+  const { name, email, password } = req.body;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const user = await User.create({ name, email, password: hashedPassword });
+  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+  res.json({ token });
+});
+
+// Login
+router.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (user && await bcrypt.compare(password, user.password)) {
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+    res.json({ token });
+  } else {
+    res.status(401).json({ message: "Invalid credentials" });
+  }
+});
+
+module.exports = router;
+const express = require("express");
+const router = express.Router();
+const Product = require("../models/Product");
+const { protect } = require("../middleware/authMiddleware");
+
+// Get all products
+router.get("/", async (req, res) => {
+  const products = await Product.find({});
+  res.json(products);
+});
+
+// Admin: Add product
+router.post("/", protect, async (req, res) => {
+  if (!req.user.isAdmin) return res.status(401).json({ message: "Not authorized" });
+  const product = new Product(req.body);
+  const createdProduct = await product.save();
+  res.status(201).json(createdProduct);
+});
+
+module.exports = router;
+const express = require("express");
+const router = express.Router();
+const Product = require("../models/Product");
+const Order = require("../models/Order");
+const User = require("../models/User");
+const { protect } = require("../middleware/authMiddleware");
+const admin = require("../middleware/adminMiddleware");
+
+// CRUD products
+router.get("/products", protect, admin, async (req, res) => {
+  const products = await Product.find({});
+  res.json(products);
+});
+
+// View orders
+router.get("/orders", protect, admin, async (req, res) => {
+  const orders = await Order.find({}).populate("user", "name email");
+  res.json(orders);
+});
+
+// View users
+router.get("/users", protect, admin, async (req, res) => {
+  const users = await User.find({});
+  res.json(users);
+});
+
+module.exports = router;
+const mongoose = require("mongoose");
+const dotenv = require("dotenv");
+const Product = require("./models/Product");
+const User = require("./models/User");
+
+dotenv.config();
+mongoose.connect(process.env.MONGO_URI);
+
+const products = [
+  { name: "T-Shirt", description: "Cool cotton t-shirt", price: 20, image: "https://via.placeholder.com/150", countInStock: 50 },
+  { name: "Jeans", description: "Blue denim jeans", price: 40, image: "https://via.placeholder.com/150", countInStock: 30 },
+  { name: "Sneakers", description: "Comfortable running shoes", price: 60, image: "https://via.placeholder.com/150", countInStock: 20 }
+];
+
+const seed = async () => {
+  await Product.deleteMany();
+  await Product.insertMany(products);
+
+  await User.deleteMany();
+  await User.create({ name: "Admin", email: "admin@example.com", password: "admin123", isAdmin: true });
+
+  console.log("Database seeded!");
+  process.exit();
+};
+
+seed();
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const connectDB = require("./config/db");
+
+dotenv.config();
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/products", require("./routes/productRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+import React, { createContext, useReducer, useContext } from "react";
+
+const CartStateContext = createContext();
+const CartDispatchContext = createContext();
+
+const cartReducer = (state, action) => {
+  switch (action.type) {
+    case "ADD_TO_CART":
+      const existItem = state.cartItems.find(x => x._id === action.payload._id);
+      if (existItem) {
+        return {
+          ...state,
+          cartItems: state.cartItems.map(x =>
+            x._id === existItem._id ? { ...x, qty: x.qty + 1 } : x
+          ),
+        };
+      } else {
+        return { ...state, cartItems: [...state.cartItems, { ...action.payload, qty: 1 }] };
+      }
+    case "REMOVE_FROM_CART":
+      return { ...state, cartItems: state.cartItems.filter(x => x._id !== action.payload._id) };
+    case "CLEAR_CART":
+      return { ...state, cartItems: [] };
+    default:
+      throw new Error(`Unknown action: ${action.type}`);
+  }
+};
+
+export const CartProvider = ({ children }) => {
+  const [state, dispatch] = useReducer(cartReducer, { cartItems: [] });
+  return (
+    <CartDispatchContext.Provider value={dispatch}>
+      <CartStateContext.Provider value={state}>
+        {children}
+      </CartStateContext.Provider>
+    </CartDispatchContext.Provider>
+  );
+};
+
+export const useCart = () => useContext(CartStateContext);
+export const useCartDispatch = () => useContext(CartDispatchContext);
+import React from "react";
+import ReactDOM from "react-dom";
+import App from "./App";
+import { CartProvider } from "./context/CartContext";
+
+ReactDOM.render(
+  <CartProvider>
+    <App />
+  </CartProvider>,
+  document.getElementById("root")
+);
+import React from "react";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import Home from "./pages/Home";
+import Cart from "./pages/Cart";
+import Checkout from "./pages/Checkout";
+import AdminDashboard from "./pages/AdminDashboard";
+import Login from "./pages/Login";
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/cart" element={<Cart />} />
+        <Route path="/checkout" element={<Checkout />} />
+        <Route path="/admin" element={<AdminDashboard />} />
+        <Route path="/login" element={<Login />} />
+      </Routes>
+    </Router>
+  );
+}
+
+export default App;
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+import { useCartDispatch } from "../context/CartContext";
+
+const Home = () => {
+  const [products, setProducts] = useState([]);
+  const dispatch = useCartDispatch();
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/products");
+      setProducts(data);
+    };
+    fetchProducts();
+  }, []);
+
+  return (
+    <div>
+      <h1>Products</h1>
+      <div style={{ display: "flex", gap: "20px" }}>
+        {products.map(p => (
+          <div key={p._id} style={{ border: "1px solid #ccc", padding: "10px" }}>
+            <img src={p.image} alt={p.name} width="150" />
+            <h3>{p.name}</h3>
+            <p>${p.price}</p>
+            <button onClick={() => dispatch({ type: "ADD_TO_CART", payload: p })}>
+              Add to Cart
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default Home;
+import React from "react";
+import { useCart, useCartDispatch } from "../context/CartContext";
+
+const Cart = () => {
+  const { cartItems } = useCart();
+  const dispatch = useCartDispatch();
+
+  const totalPrice = cartItems.reduce((acc, item) => acc + item.price * item.qty, 0);
+
+  return (
+    <div>
+      <h1>Your Cart</h1>
+      {cartItems.length === 0 ? (
+        <p>Cart is empty</p>
+      ) : (
+        <div>
+          {cartItems.map(item => (
+            <div key={item._id}>
+              {item.name} x {item.qty} - ${item.price * item.qty}
+              <button onClick={() => dispatch({ type: "REMOVE_FROM_CART", payload: item })}>
+                Remove
+              </button>
+            </div>
+          ))}
+          <h3>Total: ${totalPrice}</h3>
+          <button onClick={() => window.location.href = "/checkout"}>Proceed to Checkout</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Cart;
+import React from "react";
+import { useCart } from "../context/CartContext";
+import axios from "axios";
+
+const Checkout = () => {
+  const { cartItems } = useCart();
+
+  const handleCheckout = async () => {
+    const { data } = await axios.post(
+      "http://localhost:5000/api/orders/create-checkout-session",
+      { cartItems },
+      { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } }
+    );
+    window.location.href = data.url;
+  };
+
+  return (
+    <div>
+      <h1>Checkout</h1>
+      <button onClick={handleCheckout}>Pay with Card</button>
+    </div>
+  );
+};
+
+export default Checkout;
+import React, { useState } from "react";
+import axios from "axios";
+
+const Login = () => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const { data } = await axios.post("http://localhost:5000/api/auth/login", { email, password });
+    localStorage.setItem("token", data.token);
+    alert("Login successful!");
+    window.location.href = "/";
+  };
+
+  return (
+    <div>
+      <h1>Login</h1>
+      <form onSubmit={handleSubmit}>
+        <input placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
+        <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} />
+        <button type="submit">Login</button>
+      </form>
+    </div>
+  );
+};
+
+export default Login;
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+const AdminDashboard = () => {
+  const [products, setProducts] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [users, setUsers] = useState([]);
+
+  const token = localStorage.getItem("token");
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/admin/products", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setProducts(data);
+    };
+
+    const fetchOrders = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/admin/orders", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setOrders(data);
+    };
+
+    const fetchUsers = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/admin/users", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setUsers(data);
+    };
+
+    fetchProducts();
+    fetchOrders();
+    fetchUsers();
+  }, [token]);
+
+  return (
+    <div>
+      <h1>Admin Dashboard</h1>
+
+      <section>
+        <h2>Products</h2>
+        {products.map(p => (
+          <div key={p._id}>{p.name} - ${p.price}</div>
+        ))}
+      </section>
+
+      <section>
+        <h2>Orders</h2>
+        {orders.map(o => (
+          <div key={o._id}>Order by {o.user.name} - Total: ${o.totalPrice}</div>
+        ))}
+      </section>
+
+      <section>
+        <h2>Users</h2>
+        {users.map(u => (
+          <div key={u._id}>{u.name} - {u.email} - {u.isAdmin ? "Admin" : "Customer"}</div>
+        ))}
+      </section>
+    </div>
+  );
+};
+
+export default AdminDashboard;
+cd frontend
+npm install -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+  content: ["./src/**/*.{js,jsx,ts,tsx}"],
+  theme: { extend: {} },
+  plugins: [],
+};
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+import { useCartDispatch } from "../context/CartContext";
+
+const Home = () => {
+  const [products, setProducts] = useState([]);
+  const dispatch = useCartDispatch();
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      const { data } = await axios.get("http://localhost:5000/api/products");
+      setProducts(data);
+    };
+    fetchProducts();
+  }, []);
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-3xl font-bold mb-6">Products</h1>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {products.map(p => (
+          <div key={p._id} className="border p-4 rounded shadow hover:shadow-lg transition">
+            <img src={p.image} alt={p.name} className="w-full h-48 object-cover rounded" />
+            <h3 className="mt-2 font-semibold">{p.name}</h3>
+            <p className="text-gray-700">${p.price}</p>
+            <button
+              className="mt-2 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+              onClick={() => dispatch({ type: "ADD_TO_CART", payload: p })}
+            >
+              Add to Cart
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default Home;
+import React from "react";
+import { useCart, useCartDispatch } from "../context/CartContext";
+
+const Cart = () => {
+  const { cartItems } = useCart();
+  const dispatch = useCartDispatch();
+
+  const totalPrice = cartItems.reduce((acc, item) => acc + item.price * item.qty, 0);
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-3xl font-bold mb-6">Your Cart</h1>
+      {cartItems.length === 0 ? (
+        <p>Cart is empty</p>
+      ) : (
+        <div className="space-y-4">
+          {cartItems.map(item => (
+            <div key={item._id} className="flex justify-between items-center border p-4 rounded">
+              <div>
+                {item.name} x {item.qty}
+              </div>
+              <div>${item.price * item.qty}</div>
+              <button
+                className="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600"
+                onClick={() => dispatch({ type: "REMOVE_FROM_CART", payload: item })}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <h2 className="text-xl font-semibold mt-4">Total: ${totalPrice}</h2>
+          <button
+            className="mt-2 bg-green-500 text-white px-6 py-2 rounded hover:bg-green-600"
+            onClick={() => window.location.href = "/checkout"}
+          >
+            Proceed to Checkout
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Cart;
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+const AdminDashboard = () => {
+  const [products, setProducts] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [users, setUsers] = useState([]);
+
+  const token = localStorage.getItem("token");
+
+  useEffect(() => {
+    const fetchData = async () => {
+      const [prodRes, orderRes, userRes] = await Promise.all([
+        axios.get("http://localhost:5000/api/admin/products", { headers: { Authorization: `Bearer ${token}` } }),
+        axios.get("http://localhost:5000/api/admin/orders", { headers: { Authorization: `Bearer ${token}` } }),
+        axios.get("http://localhost:5000/api/admin/users", { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+      setProducts(prodRes.data);
+      setOrders(orderRes.data);
+      setUsers(userRes.data);
+    };
+    fetchData();
+  }, [token]);
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-3xl font-bold mb-6">Admin Dashboard</h1>
+
+      <section className="mb-8">
+        <h2 className="text-2xl font-semibold mb-2">Products</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {products.map(p => (
+            <div key={p._id} className="border p-4 rounded shadow">{p.name} - ${p.price}</div>
+          ))}
+        </div>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-2xl font-semibold mb-2">Orders</h2>
+        {orders.map(o => (
+          <div key={o._id} className="border p-2 rounded mb-2">Order by {o.user.name} - Total: ${o.totalPrice}</div>
+        ))}
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-semibold mb-2">Users</h2>
+        {users.map(u => (
+          <div key={u._id} className="border p-2 rounded mb-2">{u.name} - {u.email} - {u.isAdmin ? "Admin" : "Customer"}</div>
+        ))}
+      </section>
+    </div>
+  );
+};
+
+export default AdminDashboard;
+import React, { useState } from "react";
+import axios from "axios";
+
+const Login = () => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const { data } = await axios.post("http://localhost:5000/api/auth/login", { email, password });
+      localStorage.setItem("token", data.token);
+      alert("Login successful!");
+      window.location.href = "/";
+    } catch (err) {
+      alert("Invalid credentials");
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-gray-100">
+      <div className="bg-white p-8 rounded shadow-md w-full max-w-md">
+        <h1 className="text-2xl font-bold mb-6 text-center">Login</h1>
+        <form onSubmit={handleSubmit} className="space-y
+        import React from "react";
+import { useCart } from "../context/CartContext";
+import axios from "axios";
+
+const Checkout = () => {
+  const { cartItems } = useCart();
+  const totalPrice = cartItems.reduce((acc, item) => acc + item.price * item.qty, 0);
+
+  const handleCheckout = async () => {
+    try {
+      const { data } = await axios.post(
+        "http://localhost:5000/api/orders/create-checkout-session",
+        { cartItems },
+        { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } }
+      );
+      window.location.href = data.url;
+    } catch (err) {
+      alert("Error initiating checkout");
+    }
+  };
+
+  return (
+    <div className="container mx-auto p-6 bg-gray-50 min-h-screen">
+      <h1 className="text-3xl font-bold mb-6">Checkout</h1>
+      <div className="bg-white p-6 rounded shadow-md">
+        {cartItems.map(item => (
+          <div key={item._id} className="flex justify-between border-b py-2">
+            <span>{item.name} x {item.qty}</span>
+            <span>${item.price * item.qty}</span>
+          </div>
+        ))}
+        <div className="flex justify-between mt-4 font-semibold">
+          <span>Total:</span>
+          <span>${totalPrice}</span>
+        </div>
+        <button
+          onClick={handleCheckout}
+          className="mt-6 w-full bg-green-500 text-white py-3 rounded hover:bg-green-600 transition"
+        >
+          Pay with Card
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default Checkout;
+import React, { useState } from "react";
+import axios from "axios";
+
+const Register = () => {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const { data } = await axios.post("http://localhost:5000/api/auth/register", { name, email, password });
+      localStorage.setItem("token", data.token);
+      alert("Registration successful!");
+      window.location.href = "/";
+    } catch (err) {
+      alert("Error creating account");
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-gray-100">
+      <div className="bg-white p-8 rounded shadow-md w-full max-w-md">
+        <h1 className="text-2xl font-bold mb-6 text-center">Register</h1>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <input
+            type="text"
+            placeholder="Name"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            className="w-full p-3 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+            required
+          />
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            className="w-full p-3 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            className="w-full p-3 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+            required
+          />
+          <button
+            type="submit"
+            className="w-full bg-blue-500 text-white p-3 rounded hover:bg-blue-600 transition"
+          >
+            Register
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+export default Register;
+cd frontend
+npm install @stripe/react-stripe-js @stripe/stripe-js
+const express = require("express");
+const router = express.Router();
+const { protect } = require("../middleware/authMiddleware");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const Order = require("../models/Order");
+
+// Create checkout session
+router.post("/create-checkout-session", protect, async (req, res) => {
+  const { cartItems } = req.body;
+
+  const line_items = cartItems.map(item => ({
+    price_data: {
+      currency: "usd",
+      product_data: { name: item.name },
+      unit_amount: item.price * 100
+    },
+    quantity: item.qty
+  }));
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ["card"],
+    line_items,
+    mode: "payment",
+    success_url: `${process.env.CLIENT_URL}/success`,
+    cancel_url: `${process.env.CLIENT_URL}/cart`
+  });
+
+  // Optionally, save order in DB as pending
+  await Order.create({
+    user: req.user._id,
+    orderItems: cartItems.map(item => ({ name: item.name, qty: item.qty, price: item.price, product: item._id })),
+    totalPrice: cartItems.reduce((acc, item) => acc + item.price * item.qty, 0),
+    isPaid: false
+  });
+
+  res.json({ url: session.url });
+});
+
+module.exports = router;
+app.use("/api/orders", require("./routes/orderRoutes"));
+import React from "react";
+import { useCart } from "../context/CartContext";
+import axios from "axios";
+import { loadStripe } from "@stripe/stripe-js";
+import { Elements, CardElement, useStripe, useElements } from "@stripe/react-stripe-js";
+
+const stripePromise = loadStripe("YOUR_STRIPE_PUBLIC_KEY");
+
+const CheckoutForm = () => {
+  const { cartItems } = useCart();
+  const stripe = useStripe();
+  const elements = useElements();
+
+  const handleCheckout = async () => {
+    if (!stripe || !elements) return;
+
+    try {
+      const { data } = await axios.post(
+        "http://localhost:5000/api/orders/create-checkout-session",
+        { cartItems },
+        { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } }
+      );
+
+      window.location.href = data.url;
+    } catch (err) {
+      alert("Checkout failed.");
+    }
+  };
+
+  return (
+    <div className="bg-white p-6 rounded shadow-md max-w-md mx-auto mt-10">
+      <h1 className="text-2xl font-bold mb-4">Checkout</h1>
+      <div className="mb-4">
+        <CardElement className="p-3 border rounded" />
+      </div>
+      <button
+        className="w-full bg-green-500 text-white py-3 rounded hover:bg-green-600 transition"
+        onClick={handleCheckout}
+      >
+        Pay ${cartItems.reduce((acc, item) => acc + item.price * item.qty, 0)}
+      </button>
+    </div>
+  );
+};
+
+const Checkout = () => (
+  <Elements stripe={stripePromise}>
+    <CheckoutForm />
+  </Elements>
+);
+
+export default Checkout;
+import React from "react";
+
+const Success = () => (
+  <div className="flex flex-col items-center justify-center min-h-screen bg-green-100">
+    <h1 className="text-3xl font-bold mb-4">Payment Successful!</h1>
+    <p className="text-lg">Thank you for your purchase.</p>
+    <a href="/" className="mt-4 bg-blue-500 text-white px-6 py-2 rounded hover:bg-blue-600">Back to Home</a>
+  </div>
+);
+
+export default Success;
+<Route path="/success" element={<Success />} />
+shopping-app/
+│
+├─ backend/
+│  ├─ config/
+│  │   └─ db.js
+│  ├─ middleware/
+│  │   ├─ authMiddleware.js
+│  │   └─ adminMiddleware.js
+│  ├─ models/
+│  │   ├─ User.js
+│  │   ├─ Product.js
+│  │   └─ Order.js
+│  ├─ routes/
+│  │   ├─ authRoutes.js
+│  │   ├─ productRoutes.js
+│  │   ├─ adminRoutes.js
+│  │   └─ orderRoutes.js
+│  ├─ seed.js
+│  ├─ server.js
+│  └─ .env
+│
+├─ frontend/
+│  ├─ src/
+│  │   ├─ context/
+│  │   │   └─ CartContext.js
+│  │   ├─ pages/
+│  │   │   ├─ Home.js
+│  │   │   ├─ Cart.js
+│  │   │   ├─ Checkout.js
+│  │   │   ├─ Success.js
+│  │   │   ├─ Login.js
+│  │   │   ├─ Register.js
+│  │   │   └─ AdminDashboard.js
+│  │   ├─ App.js
+│  │   └─ index.js
+│  ├─ index.css
+│  ├─ tailwind.config.js
+│  ├─ package.json
+│  └─ public/
+│      └─ index.html
+│
+└─ README.md
+MONGO_URI=mongodb://localhost:27017/shoppingapp
+JWT_SECRET=your_jwt_secret
+STRIPE_SECRET_KEY=your_stripe_secret
+CLIENT_URL=http://localhost:3000
+PORT=5000
+node backend/seed.js
+cd backend
+npm install
+node server.js
+cd frontend
+npm install
+npm start
+shopping-app/
+│
+├─ backend/
+│  ├─ config/
+│  │   └─ db.js
+│  ├─ middleware/
+│  │   ├─ authMiddleware.js
+│  │   └─ adminMiddleware.js
+│  ├─ models/
+│  │   ├─ User.js
+│  │   ├─ Product.js
+│  │   └─ Order.js
+│  ├─ routes/
+│  │   ├─ authRoutes.js
+│  │   ├─ productRoutes.js
+│  │   ├─ adminRoutes.js
+│  │   └─ orderRoutes.js
+│  ├─ seed.js
+│  ├─ server.js
+│  └─ .env
+│
+├─ frontend/
+│  ├─ src/
+│  │   ├─ context/
+│  │   │   └─ CartContext.js
+│  │   ├─ pages/
+│  │   │   ├─ Home.js
+│  │   │   ├─ Cart.js
+│  │   │   ├─ Checkout.js
+│  │   │   ├─ Success.js
+│  │   │   ├─ Login.js
+│  │   │   ├─ Register.js
+│  │   │   └─ AdminDashboard.js
+│  │   ├─ App.js
+│  │   └─ index.js
+│  ├─ index.css
+│  ├─ tailwind.config.js
+│  ├─ package.json
+│  └─ public/
+│      └─ index.html
+│
+└─ README.md
+cd backend
+npm install
+node seed.js       # Seed database with products + admin user
+node server.js     # Start backend on port 5000
+cd frontend
+npm install
+npm start          # Start frontend on port 3000
+shopping-app/
+├─ backend/
+│  ├─ config/
+│  ├─ middleware/
+│  ├─ models/
+│  ├─ routes/
+│  ├─ seed.js
+│  ├─ server.js
+│  └─ .env
+├─ frontend/
+│  ├─ src/
+│  │  ├─ context/
+│  │  ├─ pages/
+│  │  ├─ App.js
+│  │  └─ index.js
+│  ├─ index.css
+│  ├─ tailwind.config.js
+│  ├─ package.json
+│  └─ public/
+│      └─ index.html
+└─ README.md
+cd backend
+npm install
+node seed.js
+node server.js
+cd frontend
+npm install
+npm start
+const fs = require("fs");
+const path = require("path");
+
+const projectRoot = path.join(__dirname, "shopping-app");
+
+// Helper to create folder
+const createFolder = (folder) => {
+  if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
+};
+
+// Helper to write file
+const writeFile = (filePath, content) => {
+  fs.writeFileSync(filePath, content, "utf8");
+};
+
+// 1️⃣ Create Folder Structure
+const folders = [
+  "shopping-app/backend/config",
+  "shopping-app/backend/middleware",
+  "shopping-app/backend/models",
+  "shopping-app/backend/routes",
+  "shopping-app/frontend/src/context",
+  "shopping-app/frontend/src/pages",
+  "shopping-app/frontend/public"
+];
+
+folders.forEach(f => createFolder(path.join(__dirname, f)));
+
+// 2️⃣ Backend Files
+writeFile(path.join(projectRoot, "backend/config/db.js"), `
+const mongoose = require("mongoose");
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("MongoDB Connected");
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+};
+module.exports = connectDB;
+`);
+
+writeFile(path.join(projectRoot, "backend/models/User.js"), `
+const mongoose = require("mongoose");
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isAdmin: { type: Boolean, default: false }
+}, { timestamps: true });
+module.exports = mongoose.model("User", userSchema);
+`);
+
+writeFile(path.join(projectRoot, "backend/.env
+node setup-shopping-app.js
+shopping-app/
+├─ backend/
+├─ frontend/
+└─ README.md
+cd shopping-app/backend
+npm install
+node seed.js
+node server.js
+
+cd ../frontend
+npm install
+npm start
+node setup-full-shopping-app.js
+const fs = require("fs");
+const path = require("path");
+
+const projectRoot = path.join(__dirname, "shopping-app");
+
+const createFolder = (folder) => {
+  if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
+};
+
+const writeFile = (filePath, content) => {
+  fs.writeFileSync(filePath, content, "utf8");
+};
+
+// 1️⃣ Create Folder Structure
+const folders = [
+  "shopping-app/backend/config",
+  "shopping-app/backend/middleware",
+  "shopping-app/backend/models",
+  "shopping-app/backend/routes",
+  "shopping-app/frontend/src/context",
+  "shopping-app/frontend/src/pages",
+  "shopping-app/frontend/public"
+];
+folders.forEach(f => createFolder(path.join(__dirname, f)));
+
+// 2️⃣ Backend Files
+
+writeFile(path.join(projectRoot, "backend/config/db.js"), `
+const mongoose = require("mongoose");
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("MongoDB Connected");
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+};
+module.exports = connectDB;
+`);
+
+writeFile(path.join(projectRoot, "backend/models/User.js"), `
+const mongoose = require("mongoose");
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  isAdmin: { type: Boolean, default: false }
+}, { timestamps: true });
+module.exports = mongoose.model("User", userSchema);
+`);
+
+// Similarly, add Product.js, Order.js
+writeFile(path.join(projectRoot, "backend/models/Product.js"), `
+const mongoose = require("mongoose");
+const productSchema = new mongoose.Schema({
+  name: String,
+  image: String,
+  price: Number
+}, { timestamps: true });
+module.exports = mongoose.model("Product", productSchema);
+`);
+
+writeFile(path.join(projectRoot, "backend/models/Order.js"), `
+const mongoose = require("mongoose");
+const orderSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  orderItems: [{ name: String, qty: Number, price: Number, product: { type: mongoose.Schema.Types.ObjectId, ref: "Product" } }],
+  totalPrice: Number,
+  isPaid: { type: Boolean, default: false }
+}, { timestamps: true });
+module.exports = mongoose.model("Order", orderSchema);
+`);
+
+// Middleware
+writeFile(path.join(projectRoot, "backend/middleware/authMiddleware.js"), `
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+
+const protect = async (req, res, next) => {
+  let token;
+  if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
+    try {
+      token = req.headers.authorization.split(" ")[1];
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.id).select("-password");
+      next();
+    } catch (err) {
+      res.status(401).json({ message: "Not authorized" });
+    }
+  } else {
+    res.status(401).json({ message: "No token" });
+  }
+};
+module.exports = { protect };
+`);
+
+writeFile(path.join(projectRoot, "backend/middleware/adminMiddleware.js"), `
+const admin = (req, res, next) => {
+  if (req.user && req.user.isAdmin) next();
+  else res.status(401).json({ message: "Admin access only" });
+};
+module.exports = { admin };
+`);
+
+// Routes: authRoutes.js, productRoutes.js, adminRoutes.js, orderRoutes.js
+writeFile(path.join(projectRoot, "backend/routes/authRoutes.js"), `
+// Implement login/register routes here
+`);
+
+// Similarly fill productRoutes.js, adminRoutes.js, orderRoutes.js (with Stripe integration)
+
+// server.js
+writeFile(path.join(projectRoot, "backend/server.js"), `
+require('dotenv').config();
+const express = require("express");
+const connectDB = require("./config/db");
+const cors = require("cors");
+
+connectDB();
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/products", require("./routes/productRoutes"));
+app.use("/api/admin", require("./routes/adminRoutes"));
+app.use("/api/orders", require("./routes/orderRoutes"));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(\`Server running on port \${PORT}\`));
+`);
+
+// Seed.js
+writeFile(path.join(projectRoot, "backend/seed.js"), `
+// Seed products and admin user
+`);
+
+// .env
+writeFile(path.join(projectRoot, "backend/.env"), `
+MONGO_URI=mongodb://localhost:27017/shoppingapp
+JWT_SECRET=your_jwt_secret
+STRIPE_SECRET_KEY=your_stripe_secret
+CLIENT_URL=http://localhost:3000
+PORT=5000
+`);
+
+// 3️⃣ Frontend: CartContext.js
+writeFile(path.join(projectRoot, "frontend/src/context/CartContext.js"), `
+// Paste CartContext.js code from previous steps
+`);
+
+// 4️⃣ Frontend pages: Home.js, Cart.js, Checkout.js, Success.js, Login.js, Register.js, AdminDashboard.js
+writeFile(path.join(projectRoot, "frontend/src/pages/Home.js"), `
+// Paste Home.js code from previous steps
+`);
+
+// Similarly add Cart.js, Checkout.js, Success.js, Login.js, Register.js, AdminDashboard.js
+
+// App.js
+writeFile(path.join(projectRoot, "frontend/src/App.js"), `
+// Paste App.js code from previous steps
+`);
+
+// index.js
+writeFile(path.join(projectRoot, "frontend/src/index.js"), `
+// Paste index.js code from previous steps
+`);
+
+// Tailwind
+writeFile(path.join(projectRoot,
+node setup-full-shopping-app.js
+cd shopping-app/backend
+npm install
+node seed.js
+node server.js
+
+cd ../frontend
+npm install
+npm start
